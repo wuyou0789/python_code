@@ -16,37 +16,7 @@ New in v5.0:
   - Added filename cleaning feature to remove resolution tags (e.g., '_r720P')
     from the output filename, using regular expressions.
 
-config.json:
-{
-  "input_directory": "/path/to/your/videos",
-  "output_directory": "/path/to/save/music",
-  "recursive_search": true,
-  "bitrate": "192k",
-  "log_file": "/var/log/video_conversion.log",
-  "append_source_extension": true
-}
-
-input_directory (字符串, 必填):
-说明：包含源视频文件的目录的绝对路径。
-例子："/mnt/nas/videos_to_convert"
-output_directory (字符串, 必填):
-说明：用于保存转换后 MP3 文件的目标目录的绝对路径。脚本会自动创建此目录（如果不存在）。
-例子："/mnt/nas/converted_audio"
-recursive_search (布尔值, 可选, 默认 false):
-说明：如果设置为 true，脚本将递归搜索 input_directory 下的所有子目录来查找视频文件。如果为 false，则只处理 input_directory 根目录下的文件。
-例子：true
-bitrate (字符串, 可选, 默认 "192k"):
-说明：输出 MP3 文件的音频比特率。值越高，音质越好，文件也越大。
-例子："128k", "192k", "320k"
-log_file (字符串, 可选, 默认 null 或不提供):
-说明：指定一个日志文件的绝对路径。如果提供此项，所有运行日志都将追加到此文件中；否则，日志将直接输出到控制台（标准输出）。
-例子："/home/user/logs/conversion.log"
-append_source_extension (布尔值, 可选, 默认 true):
-说明：决定是否将原始视频的扩展名附加到输出的 MP3 文件名中。
-设置为 true (默认)：video.mp4 → video_mp4.mp3。这是更安全的选项，可以避免因不同格式的同名视频（如 file.mp4 和 file.mkv）导致的输出文件冲突。
-设置为 false：video.mp4 → video.mp3。文件名更简洁，但如果存在同名不同格式的源文件，后面的转换会覆盖前面的结果。
-例子：false
-
+... (Previous descriptions) ...
 ================================================================================
 """
 import os
@@ -55,7 +25,7 @@ import json
 import argparse
 import subprocess
 import logging
-import re # <<< 新增：导入正则表达式模块
+import re
 
 # ... (setup_logging and find_video_files functions are unchanged) ...
 def setup_logging(logfile=None):
@@ -101,6 +71,89 @@ def clean_filename(base_name):
 
 
 def convert_videos_to_mp3(source_dir, output_dir, recursive, bitrate, append_extension):
+    """
+    The main logic for finding and converting video files.
+    Uses a robust temp-file-then-rename strategy.
+    """
+    logging.info("Starting conversion process...")
+    logging.info(f"Source: {source_dir}, Output: {output_dir}, Recursive: {recursive}, Bitrate: {bitrate}, Append Extension: {append_extension}")
+    counters = {'converted': 0, 'skipped': 0, 'failed': 0, 'found': 0}
+
+    # <<< 修改 1：将整个循环包裹在 try...except KeyboardInterrupt 中，以捕获 Ctrl+C >>>
+    try:
+        for video_filepath in find_video_files(source_dir, recursive):
+            counters['found'] += 1
+            mp3_filepath = None  # 在循环开始时重置
+            mp3_temp_path = None # 在循环开始时重置
+            
+            try:
+                relative_path = os.path.relpath(os.path.dirname(video_filepath), source_dir)
+                filename = os.path.basename(video_filepath)
+                base_name, orig_ext = os.path.splitext(filename)
+
+                cleaned_base_name = clean_filename(base_name)
+                
+                if append_extension:
+                    mp3_filename = f"{cleaned_base_name}_{orig_ext[1:].lower()}.mp3"
+                else:
+                    mp3_filename = f"{cleaned_base_name}.mp3"
+                
+                final_output_dir = os.path.join(output_dir, relative_path) if relative_path != '.' else output_dir
+                mp3_filepath = os.path.join(final_output_dir, mp3_filename)
+                
+                # <<< 修改 2：定义一个临时文件名 >>>
+                mp3_temp_path = mp3_filepath + ".tmp"
+                
+                os.makedirs(final_output_dir, exist_ok=True)
+
+                if os.path.exists(mp3_filepath):
+                    logging.debug(f"SKIP: Final MP3 '{mp3_filename}' already exists.")
+                    counters['skipped'] += 1
+                    continue
+                
+                # <<< 新增：如果存在上次失败留下的临时文件，先清理掉 >>>
+                if os.path.exists(mp3_temp_path):
+                    logging.warning(f"CLEANUP: Removing old temporary file '{os.path.basename(mp3_temp_path)}'.")
+                    os.remove(mp3_temp_path)
+
+                logging.info(f"CONVERTING: '{filename}' -> '{os.path.basename(mp3_temp_path)}'")
+                
+                # <<< 修改 3：ffmpeg 命令输出到临时文件 >>>
+                command = ["ffmpeg", "-i", video_filepath, "-vn", "-b:a", bitrate, "-loglevel", "error", "-y", mp3_temp_path]
+                
+                subprocess.run(command, check=True, capture_output=True, text=True)
+
+                # <<< 修改 4：转换成功后，将临时文件重命名为最终文件 >>>
+                os.rename(mp3_temp_path, mp3_filepath)
+                
+                counters['converted'] += 1
+                logging.info(f"SUCCESS: Created '{mp3_filename}'.")
+                
+            except subprocess.CalledProcessError as e:
+                logging.error(f"FAILURE: Failed to convert '{video_filepath}'.")
+                logging.error(f"  FFmpeg Return Code: {e.returncode}")
+                logging.error(f"  FFmpeg Error Output: {e.stderr.strip()}")
+                counters['failed'] += 1
+                # <<< 修改 5：如果转换失败，清理的是临时文件 >>>
+                if mp3_temp_path and os.path.exists(mp3_temp_path):
+                    os.remove(mp3_temp_path)
+                    logging.warning(f"  CLEANUP: Removed incomplete temporary file '{os.path.basename(mp3_temp_path)}'.")
+            except Exception as e:
+                logging.error(f"UNEXPECTED ERROR while processing '{video_filepath}': {e}")
+                counters['failed'] += 1
+                # 如果发生其他异常，也尝试清理临时文件
+                if mp3_temp_path and os.path.exists(mp3_temp_path):
+                    os.remove(mp3_temp_path)
+                    logging.warning(f"  CLEANUP: Removed incomplete temporary file due to unexpected error.")
+
+    except KeyboardInterrupt:
+        logging.warning("\n--- Process interrupted by user (Ctrl+C) ---")
+        logging.warning("--- Exiting gracefully. ---")
+        # 不需要在这里做特殊的清理，因为未完成的文件都是 .tmp 后缀
+        
+    finally:
+        logging.info("--- Conversion process finished ---")
+        logging.info(f"Summary: Found={counters['found']}, Converted={counters['converted']}, Skipped={counters['skipped']}, Failed={counters['failed']}")
     """
     The main logic for finding and converting video files.
     """
