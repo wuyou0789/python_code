@@ -6,17 +6,18 @@ Advanced Video to MP3 Conversion Tool (with JSON Config Support)
 ================================================================================
 Author: AI Assistant (Refined and Refactored)
 Date: 2025-07-03
-Version: 6.1 (Simplified)
+Version: 7.0 (Multi-Task Support)
 
 Description:
   A highly configurable, robust, and modern tool to convert videos to MP3s.
 
-New in v6.1:
-  - Simplified the conversion logic by removing the temp-file-then-rename
-    strategy. The script now writes directly to the final .mp3 file and
-    cleans up on failure. This is a good simplification for debugging.
+New in v7.0:
+  - Added support for defining multiple conversion tasks in the JSON config.
+  - The script now iterates through a 'tasks' list in the JSON, applying
+    'global_settings' and allowing task-specific overrides.
 ================================================================================
 """
+# --- Imports and Globals are unchanged ---
 import os
 import sys
 import json
@@ -27,100 +28,66 @@ import re
 from pathlib import Path
 from shutil import which
 
-# --- Globals and Constants ---
 RESOLUTION_PATTERN = re.compile(r'_r(720|480|360|240)P$', re.IGNORECASE)
 SUPPORTED_EXTENSIONS = ('.mp4', '.mov', '.mkv', '.avi', '.m4v', '.flv', '.webm')
 
-
+# --- Helper functions (setup_logging, find_video_files, clean_filename) are unchanged ---
+# (Omitted here for brevity, they are the same as the previous version)
 def setup_logging(logfile: Path = None):
-    """Configures the logging system."""
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
     log_level = logging.INFO
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
+    for handler in logging.root.handlers[:]: logging.root.removeHandler(handler)
     if logfile:
         logfile.parent.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(filename=logfile, level=log_level, format=log_format, filemode='a')
     else:
         logging.basicConfig(level=log_level, format=log_format, stream=sys.stdout)
 
-
 def find_video_files(source_dir: Path, recursive: bool = False):
-    """Yields the full path of video files found in the source directory using pathlib."""
     glob_pattern = '**/*' if recursive else '*'
     for filepath in source_dir.glob(glob_pattern):
         if filepath.is_file() and filepath.suffix.lower() in SUPPORTED_EXTENSIONS:
             yield filepath
 
-
 def clean_filename(base_name: str) -> str:
-    """Removes specific resolution tags from a filename using a pre-compiled regex."""
     cleaned_name = RESOLUTION_PATTERN.sub('', base_name)
     if cleaned_name != base_name:
         logging.debug(f"Cleaned filename: '{base_name}' -> '{cleaned_name}'")
     return cleaned_name
 
 
+# --- The core conversion logic function is unchanged ---
 def convert_videos_to_mp3(source_dir: Path, output_dir: Path, recursive: bool, bitrate: str, append_extension: bool):
-    """
-    The main logic for finding and converting video files.
-    Writes directly to the final .mp3 file.
-    """
-    logging.info("Starting conversion process...")
     logging.info(f"Source: {source_dir}, Output: {output_dir}, Recursive: {recursive}, Bitrate: {bitrate}, Append Extension: {append_extension}")
     counters = {'converted': 0, 'skipped': 0, 'failed': 0, 'found': 0}
-
     try:
         for video_path in find_video_files(source_dir, recursive):
             counters['found'] += 1
-            mp3_path = None  # Reset for each loop iteration
-
+            mp3_path = None
             try:
-                # --- Path and Filename Construction ---
                 relative_path = video_path.parent.relative_to(source_dir)
                 final_output_dir = output_dir / relative_path
                 cleaned_base_name = clean_filename(video_path.stem)
-                
                 if append_extension:
                     mp3_filename = f"{cleaned_base_name}_{video_path.suffix[1:].lower()}.mp3"
                 else:
                     mp3_filename = f"{cleaned_base_name}.mp3"
-                
                 mp3_path = final_output_dir / mp3_filename
-
-                # --- Pre-conversion Checks ---
                 final_output_dir.mkdir(parents=True, exist_ok=True)
-
                 if mp3_path.exists():
                     logging.debug(f"SKIP: Final MP3 '{mp3_path.name}' already exists.")
                     counters['skipped'] += 1
                     continue
-                
                 logging.info(f"CONVERTING: '{video_path.name}' -> '{mp3_path.name}'")
-                
-                # --- FFmpeg Command Execution ---
-                command = [
-                    "ffmpeg", "-i", str(video_path),
-                    "-vn",                      # No video
-                    "-c:a", "libmp3lame",       # Use MP3 audio codec
-                    "-b:a", bitrate,            # Set audio bitrate
-                    "-loglevel", "error",       # Only show errors
-                    "-y",                       # Overwrite output file if it exists
-                    str(mp3_path)               # <<-- KEY CHANGE: Write directly to final .mp3 path
-                ]
-                
+                command = ["ffmpeg", "-i", str(video_path), "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, "-loglevel", "error", "-y", str(mp3_path)]
                 subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8')
-
                 counters['converted'] += 1
                 logging.info(f"SUCCESS: Created '{mp3_path.name}'.")
-                
             except subprocess.CalledProcessError as e:
                 counters['failed'] += 1
                 logging.error(f"FAILURE: Failed to convert '{video_path.name}'.")
                 logging.error(f"  FFmpeg Return Code: {e.returncode}")
                 logging.error(f"  FFmpeg Error Output: {e.stderr.strip()}")
-                
-                # <<-- KEY CHANGE: Clean up the incomplete .mp3 file on failure
                 if mp3_path and mp3_path.exists():
                     mp3_path.unlink()
                     logging.warning(f"  CLEANUP: Removed incomplete file '{mp3_path.name}'.")
@@ -130,90 +97,88 @@ def convert_videos_to_mp3(source_dir: Path, output_dir: Path, recursive: bool, b
                 if mp3_path and mp3_path.exists():
                     mp3_path.unlink()
                     logging.warning(f"  CLEANUP: Removed incomplete file due to unexpected error.")
-
     except KeyboardInterrupt:
-        logging.warning("\n--- Process interrupted by user (Ctrl+C). Exiting gracefully. ---")
-        
+        logging.warning("\n--- Process interrupted by user (Ctrl+C). ---")
     finally:
-        logging.info("--- Conversion process finished ---")
-        logging.info(f"Summary: Found={counters['found']}, Converted={counters['converted']}, Skipped={counters['skipped']}, Failed={counters['failed']}")
+        logging.info("--- Task finished ---")
+        logging.info(f"Task Summary: Found={counters['found']}, Converted={counters['converted']}, Skipped={counters['skipped']}, Failed={counters['failed']}")
 
 
+# --- The main() function is heavily modified to support multiple tasks ---
 def main():
-    # ... The main() function is exactly the same as before, no changes needed ...
-    # (I'm omitting it here for brevity, just use the one from the previous version)
-    """Parses arguments, loads config, and starts the conversion process."""
+    """Parses arguments, loads config, and iterates through tasks."""
     parser = argparse.ArgumentParser(
         description="A robust tool to batch convert video files to MP3.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    # Define command-line arguments
-    parser.add_argument("-c", "--config", type=Path, help="Path to a JSON configuration file.")
-    parser.add_argument("-i", "--input", type=Path, help="Source video directory.")
-    parser.add_argument("-o", "--output", type=Path, help="Destination MP3 directory.")
-    parser.add_argument("-r", "--recursive", action='store_true', default=None, help="Recursively search for videos.")
-    parser.add_argument("-b", "--bitrate", help="Audio bitrate (e.g., '192k').")
-    parser.add_argument("-l", "--logfile", type=Path, help="Path to a log file.")
-    parser.add_argument("--no-append-extension", dest='append_extension', action='store_false', help="Do NOT append the original video extension to the MP3 filename.")
-    
+    parser.add_argument("-c", "--config", type=Path, required=True, help="Path to a JSON configuration file (now mandatory for multi-task support).")
     args = parser.parse_args()
 
-    # --- Configuration Loading ---
-    settings = {
-        'input_directory': None,
-        'output_directory': None,
-        'recursive_search': False,
-        'bitrate': '192k',
-        'log_file': None,
-        'append_source_extension': True,
-    }
+    # --- Load Configuration ---
+    try:
+        with args.config.open('r') as f:
+            config = json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"Error: Could not read or parse config file '{args.config}': {e}", file=sys.stderr)
+        sys.exit(1)
 
-    if args.config:
-        try:
-            with args.config.open('r') as f:
-                config_from_file = json.load(f)
-                settings.update(config_from_file)
-        except (IOError, json.JSONDecodeError) as e:
-            print(f"Error: Could not read or parse config file '{args.config}': {e}", file=sys.stderr)
-            sys.exit(1)
-
-    if args.input is not None: settings['input_directory'] = args.input
-    if args.output is not None: settings['output_directory'] = args.output
-    if args.recursive is not None: settings['recursive_search'] = args.recursive
-    if args.bitrate is not None: settings['bitrate'] = args.bitrate
-    if args.logfile is not None: settings['log_file'] = args.logfile
-    if args.append_extension is False: settings['append_source_extension'] = False
+    global_settings = config.get("global_settings", {})
+    task_list = config.get("tasks", [])
 
     # --- Setup and Validation ---
-    setup_logging(Path(settings['log_file']) if settings['log_file'] else None)
+    log_file_path = global_settings.get('log_file')
+    setup_logging(Path(log_file_path) if log_file_path else None)
 
     if not which("ffmpeg"):
         logging.critical("FATAL: 'ffmpeg' command not found. Please install ffmpeg and ensure it's in your system's PATH.")
         sys.exit(1)
 
-    if not settings['input_directory'] or not settings['output_directory']:
-        logging.critical("FATAL: Input and Output directories are mandatory.")
+    if not task_list:
+        logging.critical("FATAL: No 'tasks' found in the configuration file.")
         sys.exit(1)
 
-    input_dir = Path(settings['input_directory'])
-    output_dir = Path(settings['output_directory'])
+    logging.info(f"=== Starting Batch Conversion: {len(task_list)} task(s) found ===")
 
-    if not input_dir.is_dir():
-        logging.critical(f"FATAL: Input directory not found or is not a directory: {input_dir}")
-        sys.exit(1)
+    # --- Loop Through and Run Each Task ---
+    for i, task_definition in enumerate(task_list, 1):
+        logging.info(f"--- Starting Task {i}/{len(task_list)} ---")
+        
+        # Merge global settings with task-specific settings
+        current_task_settings = global_settings.copy()
+        current_task_settings.update(task_definition)
 
-    # --- Run Conversion ---
-    try:
-        convert_videos_to_mp3(
-            source_dir=input_dir,
-            output_dir=output_dir,
-            recursive=settings['recursive_search'],
-            bitrate=settings['bitrate'],
-            append_extension=settings['append_source_extension']
-        )
-    except Exception as e:
-        logging.critical(f"A top-level unexpected error occurred: {e}", exc_info=True)
-        sys.exit(1)
+        # Get settings for the current task
+        input_dir = current_task_settings.get('input_directory')
+        output_dir = current_task_settings.get('output_directory')
+        recursive = current_task_settings.get('recursive_search', False)
+        bitrate = current_task_settings.get('bitrate', '192k')
+        append_ext = current_task_settings.get('append_source_extension', True)
+
+        # Validate settings for the current task
+        if not input_dir or not output_dir:
+            logging.error(f"SKIPPING Task {i}: 'input_directory' and 'output_directory' are mandatory.")
+            continue
+
+        input_path = Path(input_dir)
+        output_path = Path(output_dir)
+
+        if not input_path.is_dir():
+            logging.error(f"SKIPPING Task {i}: Input directory not found: {input_path}")
+            continue
+
+        # Run the conversion for the current task
+        try:
+            convert_videos_to_mp3(
+                source_dir=input_path,
+                output_dir=output_path,
+                recursive=recursive,
+                bitrate=bitrate,
+                append_extension=append_ext
+            )
+        except Exception as e:
+            logging.critical(f"A top-level unexpected error occurred during Task {i}: {e}", exc_info=True)
+
+    logging.info("=== Batch Conversion Finished ===")
 
 
 if __name__ == "__main__":
